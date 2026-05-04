@@ -3,6 +3,8 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from sentence_transformers import SentenceTransformer
 from datetime import datetime
+import re
+import hashlib
 
 # ================= CONFIGURATION =================
 BASE = r"E:\hybrid_rag"
@@ -94,13 +96,12 @@ def ask_ollama(ctx, temp=0.2):
     except Exception as e: return f"⚠️ Ollama Error: {e}"
 
 def calibrate_confidence(sem_count, db_count, avg_sim=0.0, trend_r2=None):
-    # Normalized similarity (FAISS distance is L2, lower=better. ~0-2 range typical)
     sim_norm = max(0, 1 - (avg_sim / 2.0))
     score = 0.0
-    score += min(db_count * 12, 35)          # DB precision weight
-    score += min(sem_count * 10, 30)         # Lit coverage weight
-    score += sim_norm * 25                   # Relevance weight
-    score += 10 if trend_r2 and trend_r2 > 0.8 else 0  # Trend fit bonus
+    score += min(db_count * 12, 35)
+    score += min(sem_count * 10, 30)
+    score += sim_norm * 25
+    score += 10 if trend_r2 and trend_r2 > 0.8 else 0
     score = min(score, 100)
     label = "🟢 HIGH" if score >= 70 else ("🟡 MEDIUM" if score >= 40 else "🔴 LOW")
     breakdown = f"DB:{min(db_count*12,35)}% + Lit:{min(sem_count*10,30)}% + Sim:{sim_norm*25:.0f}%"
@@ -138,7 +139,6 @@ with tab_qa:
             st.session_state.history.insert(0, {"q": q, "ans": ans, "score": score, "ts": datetime.now().strftime("%H:%M")})
             if len(st.session_state.history) > 15: st.session_state.history.pop()
 
-    # Export Button
     if st.session_state.history:
         latest = st.session_state.history[0]
         ev_txt = f"Lit chunks: {len(sem)} | DB matches: {len(sql)}\n" + "\n".join([f"- {r}" for r in sem[:2]]) if sem else "No lit matches"
@@ -148,29 +148,60 @@ with tab_qa:
 
 # ---- TAB 2: TRENDS ----
 with tab_trend:
-    col1, col2 = st.columns(2)
-    base = col1.text_input("Base Material", "Al_A356")
-    param = col2.text_input("Varying Keyword", "wt_SiC")
-    prop = st.selectbox("Property", ["tensile_strength", "yield_strength", "hardness", "elongation"])
-    if st.button("Generate Trend", type="primary"):
-        # Inline trend logic (lightweight, no extra files)
+    st.subheader("Property vs. Parameter Trend")
+    
+    if st.checkbox("🔍 Show available materials for debugging"):
         conn = sqlite3.connect(DB)
-        rows = conn.execute("SELECT material, property_value FROM material_data WHERE material LIKE ? AND property_name = ?", [f"%{base}%", prop]).fetchall()
+        mats = conn.execute("SELECT DISTINCT material FROM material_data").fetchall()
         conn.close()
-        if len(rows) >= 3:
-            import re
-            xs, ys, labs = [], [], []
-            for m, v in rows:
-                match = re.search(rf'(\d+(?:\.\d+)?)\s*{param}', m, re.I)
-                if match: xs.append(float(match.group(1))); ys.append(float(v)); labs.append(m)
-            if len(xs) >= 3:
-                p1 = np.polyfit(xs, ys, 1); y1 = np.polyval(p1, xs); r2 = 1 - np.sum((ys-y1)**2)/np.sum((ys-np.mean(ys))**2)
-                slope = p1[0]
-                st.success(f"📈 {prop} {'increases' if slope>0 else 'decreases'} with {param} (R² = {r2:.2f})")
-                fig, ax = plt.subplots(figsize=(5,3)); ax.scatter(xs,ys,c="crimson"); ax.plot(xs,y1,"b--"); ax.set_xlabel(param); ax.set_ylabel(prop); ax.grid(True, alpha=0.3)
-                st.pyplot(fig); plt.close('all')
-            else: st.warning("Could not extract numeric values from material names.")
-        else: st.warning(f"Need ≥3 data points. Found: {len(rows)}")
+        st.code("\n".join([m[0] for m in mats[:15]]), language="text")
+        
+    col1, col2 = st.columns(2)
+    base = col1.text_input("Base Material (e.g., Al_A356)", "Al_A356")
+    param = col2.text_input("Parameter Keyword (e.g., wt_SiC, %SiC, vol)", "wt_SiC")
+    prop = st.selectbox("Target Property", ["tensile_strength", "yield_strength", "hardness", "elongation"])
+    
+    if st.button("Generate Trend", type="primary"):
+        conn = sqlite3.connect(DB)
+        rows = conn.execute("SELECT material, property_value FROM material_data WHERE material LIKE ? AND property_name = ?", 
+                           [f"%{base}%", prop]).fetchall()
+        conn.close()
+        
+        if len(rows) < 3:
+            st.warning(f"Need ≥3 data points. Found: {len(rows)}")
+            st.stop()
+            
+        xs, ys, labs = [], [], []
+        pattern = rf'(\d+(?:\.\d+)?)\s*(?:wt|vol|percent|%|\s)*{re.escape(param)}'
+        
+        for mat, val in rows:
+            match = re.search(pattern, mat, re.IGNORECASE)
+            if not match:
+                if param.lower() in mat.lower():
+                    nums = re.findall(r'\d+(?:\.\d+)?', mat)
+                    if nums: match = type('obj', (object,), {'group': lambda s: nums[-1]})()
+                    
+            if match:
+                xs.append(float(match.group(1)))
+                ys.append(float(val))
+                labs.append(mat)
+                
+        if len(xs) < 3:
+            st.error("❌ Could not extract numeric values. Check pattern or material names.")
+            st.info("💡 Try patterns like: `wt_SiC`, `%SiC`, `SiC_`, `vol`")
+            st.stop()
+            
+        p1 = np.polyfit(xs, ys, 1)
+        y1 = np.polyval(p1, xs)
+        r2 = 1 - np.sum((ys - y1)**2) / np.sum((ys - np.mean(ys))**2)
+        slope = p1[0]
+        
+        st.success(f"📈 {prop} {'increases' if slope>0 else 'decreases'} with {param} (R² = {r2:.2f}, n={len(xs)})")
+        fig, ax = plt.subplots(figsize=(5,3))
+        ax.scatter(xs, ys, c="crimson", s=60, label="Data")
+        ax.plot(xs, y1, "b--", label=f"Linear (R²={r2:.2f})")
+        ax.set_xlabel(param); ax.set_ylabel(prop); ax.grid(True, alpha=0.3); ax.legend()
+        st.pyplot(fig); plt.close('all')
 
 # ---- TAB 3: COMPARISON ----
 with tab_comp:
@@ -212,6 +243,164 @@ with tab_kg:
             else: st.info("No outgoing edges found.")
         else:
             st.warning(f"Node '{start_node}' not in graph. Try: {list(G.nodes())[:5]}")
-    gc.collect()
+
+# ================= NEW: PDF UPLOAD SECTION =================
+with st.expander("📥 Add New Papers (Drag & Drop)"):
+    st.caption("Upload PDFs → System auto-chunks, embeds, and updates retrieval index")
+    
+    # Dynamic key forces uploader to reset after processing
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+        
+    uploaded = st.file_uploader(
+        "Drop PDFs here", 
+        type=["pdf"], 
+        accept_multiple_files=True, 
+        key=f"pdf_uploader_{st.session_state.uploader_key}"
+    )
+    
+    # Load/initialize processed file registry
+    REG_PATH = os.path.join(BASE, "data", "processed", "processed_registry.json")
+    registry = {}
+    if os.path.exists(REG_PATH):
+        with open(REG_PATH, 'r') as f: registry = json.load(f)
+        
+    if uploaded:
+        st.markdown(f"📄 **{len(uploaded)}** file(s) selected")
+        
+        # 🔍 DUPLICATE CHECK (Hash-based)
+        new_files = []
+        duplicates = []
+        
+        for file in uploaded:
+            file.seek(0)
+            f_hash = hashlib.md5(file.read()).hexdigest()
+            file.seek(0)  # Reset stream for PDF reader later
+            
+            is_dup = False
+            for name, info in registry.items():
+                if file.name == name or info.get("hash") == f_hash:
+                    is_dup = True
+                    break
+                    
+            if is_dup:
+                duplicates.append(file.name)
+            else:
+                new_files.append({"name": file.name, "file": file, "hash": f_hash})
+                
+        if duplicates:
+            st.warning(f"⚠️ Skipped {len(duplicates)} duplicate(s): {', '.join(duplicates)}")
+            
+        if not new_files:
+            st.info("✅ All selected files already exist in the database. No updates needed.")
+        else:
+            st.success(f"🆕 {len(new_files)} new file(s) ready for processing")
+            
+            if st.button("🔄 Process & Update Index", type="primary"):
+                import pypdf
+                import faiss
+                from sentence_transformers import SentenceTransformer
+                
+                RAW_DIR = os.path.join(BASE, "data", "raw_pdfs")
+                PROC_DIR = os.path.join(BASE, "data", "processed")
+                CHUNKS_FILE = os.path.join(PROC_DIR, "chunks.json")
+                FAISS_FILE = os.path.join(PROC_DIR, "faiss_index.bin")
+                MAP_FILE = os.path.join(PROC_DIR, "chunk_mapping.json")
+                
+                os.makedirs(RAW_DIR, exist_ok=True)
+                progress = st.progress(0)
+                status = st.empty()
+                
+                try:
+                    # 1. Save & load existing chunks
+                    saved_paths = []
+                    for item in new_files:
+                        save_path = os.path.join(RAW_DIR, item["name"])
+                        with open(save_path, "wb") as f: f.write(item["file"].getbuffer())
+                        saved_paths.append(save_path)
+                    progress.progress(0.1)
+                    status.text("💾 Saved. Loading existing chunks...")
+                    
+                    all_chunks = []
+                    if os.path.exists(CHUNKS_FILE):
+                        with open(CHUNKS_FILE, "r", encoding="utf-8") as f: all_chunks = json.load(f)
+                    old_count = len(all_chunks)
+                    
+                    # 2. Extract & Chunk
+                    status.text("📖 Extracting text & chunking...")
+                    for i, path in enumerate(saved_paths):
+                        reader = pypdf.PdfReader(path)
+                        text = "".join([page.extract_text() or "" for page in reader.pages])
+                        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+                        
+                        start = 0
+                        chunk_size, overlap = 2000, 200
+                        while start < len(text):
+                            end = start + chunk_size
+                            if end < len(text):
+                                bp = text.rfind('. ', max(0, end-150), end)
+                                if bp > start: end = bp + 2
+                            chunk = text[start:end].strip()
+                            if len(chunk) > 50:
+                                all_chunks.append({
+                                    "source_file": os.path.basename(path),
+                                    "chunk_id": f"{os.path.basename(path)}_chunk_{len(all_chunks)+1}",
+                                    "text": chunk,
+                                    "char_length": len(chunk)
+                                })
+                            start = end - overlap
+                        progress.progress(0.1 + (0.4 * (i+1)/len(saved_paths)))
+                        
+                    del text; gc.collect()
+                    status.text(f"✅ Extracted {len(all_chunks)-old_count} new chunks. Embedding...")
+                    
+                    # 3. Embed & Rebuild FAISS (Batched for RAM safety)
+                    chunk_texts = [c["text"] for c in all_chunks]
+                    chunk_ids = [c["chunk_id"] for c in all_chunks]
+                    
+                    BATCH = 32
+                    all_embs = []
+                    for b in range(0, len(chunk_texts), BATCH):
+                        batch = chunk_texts[b:b+BATCH]
+                        emb = SentenceTransformer('all-MiniLM-L6-v2', device='cpu').encode(batch, convert_to_numpy=True).astype('float32')
+                        all_embs.append(emb)
+                        gc.collect()
+                        
+                    embeddings = np.vstack(all_embs)
+                    del all_embs, chunk_texts; gc.collect()
+                    
+                    dim = embeddings.shape[1]
+                    index = faiss.IndexFlatL2(dim)
+                    index.add(embeddings)
+                    faiss.write_index(index, FAISS_FILE)
+                    
+                    # 4. Save & Update Registry
+                    with open(MAP_FILE, "w") as f: json.dump(chunk_ids, f)
+                    with open(CHUNKS_FILE, "w", encoding="utf-8") as f: json.dump(all_chunks, f)
+                    
+                    for item in new_files:
+                        registry[item["name"]] = {"hash": item["hash"], "added": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                    with open(REG_PATH, 'w') as f: json.dump(registry, f, indent=2)
+                    
+                    progress.progress(1.0)
+                    status.text("✅ Index updated! Clearing uploader...")
+                    time.sleep(1.2)  # Let user see success
+                    
+                    # 🔄 Clear uploader & refresh UI
+                    st.session_state.uploader_key += 1
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Processing failed: {str(e)}")
+                    status.text("⚠️ Error occurred. Check console.")
+                finally:
+                    gc.collect()
+                    
+    # 📋 Show processed files log
+    if registry:
+        with st.expander("📋 View Processed Papers"):
+            sorted_reg = sorted(registry.items(), key=lambda x: x[1]["added"], reverse=True)
+            for name, info in sorted_reg:
+                st.markdown(f"📄 `{name}` | Added: {info['added']}")
 
 gc.collect()
