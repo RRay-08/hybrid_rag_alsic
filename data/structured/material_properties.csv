@@ -1,0 +1,11 @@
+material	temperature_c	property_name	property_value	unit	source
+Al_A356_Pure	25	tensile_strength	165	MPa	Mendeley_Data_2025
+Al_A356_10wt_SiC	25	tensile_strength	210	MPa	Mendeley_Data_2025
+Al_A356_20wt_SiC	25	tensile_strength	245	MPa	Mendeley_Data_2025
+Al_A356_20wt_SiC	25	hardness_vickers	115	HV	ResearchGate_2026
+Al_6061_T6_Pure	25	yield_strength	276	MPa	ASM_Handbook
+Al_6061_10vol_SiC	25	tensile_strength	345	MPa	Ferrotec_Database
+Al_6061_20vol_SiC	25	youngs_modulus	105	GPa	Ferrotec_Database
+Al_Pure_1wt_SiC_Nano	25	hardness_brinell	42	HB	MDPI_Metals_2018
+Al_Pure_3wt_SiC_Nano	25	elongation	7.5	percent	MDPI_Metals_2018
+Al_A356_SiC_MMC	500	thermal_conductivity	155	W/mK	Ferrotec_Database

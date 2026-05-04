@@ -1,0 +1,36 @@
+# Python virtual environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter notebooks (optional)
+.ipynb_checkpoints/
+
+# Large data files (optional - uncomment if needed)
+# data/processed/*.bin
+# data/processed/*.json
+
+# Environment variables
+.env
+*.log
+
+# Temporary files
+*.tmp
+*.temp
